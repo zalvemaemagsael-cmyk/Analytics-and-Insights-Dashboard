@@ -13,6 +13,7 @@ import streamlit as st
 import numpy as np
 import pickle
 import os
+import pandas as pd
 
 # ─────────────────────────────────────────────
 # Page config
@@ -20,14 +21,55 @@ import os
 st.set_page_config(
     page_title="MSME Delinquency Risk Predictor",
     page_icon="🛡️",
-    layout="centered",
+    layout="wide",
 )
 
 st.markdown("""
     <style>
         [data-testid="stSidebar"] { display: none; }
         [data-testid="collapsedControl"] { display: none; }
-        .block-container { max-width: 720px; padding-top: 2rem; }
+        .block-container { padding-top: 2rem; }
+
+        /* Assessed table styling */
+        .assessed-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        .assessed-table th {
+            text-align: left; padding: 8px 12px;
+            font-size: 11px; font-weight: 600; color: #888;
+            text-transform: uppercase; letter-spacing: 0.05em;
+            border-bottom: 1.5px solid #e5e7eb;
+        }
+        .assessed-table td {
+            padding: 10px 12px;
+            border-bottom: 1px solid #f0f0f0;
+            vertical-align: middle;
+        }
+        .assessed-table tr:last-child td { border-bottom: none; }
+        .assessed-table .row-num { color: #888; font-size: 12px; }
+        .assessed-table .msme-name { font-weight: 500; color: #1a56db; }
+        .badge-delinquent {
+            background: #FEF3C7; color: #92400E;
+            border: 1px solid #FCD34D;
+            padding: 3px 10px; border-radius: 20px;
+            font-size: 12px; font-weight: 500;
+        }
+        .badge-compliant {
+            background: #D1FAE5; color: #065F46;
+            border: 1px solid #6EE7B7;
+            padding: 3px 10px; border-radius: 20px;
+            font-size: 12px; font-weight: 500;
+        }
+        .badge-critical {
+            background: #FEE2E2; color: #991B1B;
+            border: 1px solid #FCA5A5;
+            padding: 3px 10px; border-radius: 20px;
+            font-size: 12px; font-weight: 500;
+        }
+        .badge-medium {
+            background: #FAEEDA; color: #7A4209;
+            border: 1px solid #EF9F27;
+            padding: 3px 10px; border-radius: 20px;
+            font-size: 12px; font-weight: 500;
+        }
     </style>
 """, unsafe_allow_html=True)
 
@@ -36,18 +78,11 @@ st.markdown("""
 # ─────────────────────────────────────────────
 PROVINCES  = ["Aklan", "Antique", "Capiz", "Guimaras", "Iloilo", "Negros"]
 SECTORS    = [
-    "Agriculture/Marine/Aquaculture",
-    "Food Processing",
-    "Furniture",
-    "Gifts, Decors, Handicrafts",
-    "Horticulture and Agriculture",
-    "Metals & Engineering",
-    "Others",
-    "Others (Health Products & Services/Pharma)",
-    "Others (Health Products)",
-    "Others (ICT)",
-    "Others (Laboratory Analysis)",
-    "Others (Lime Processing)",
+    "Agriculture/Marine/Aquaculture", "Food Processing", "Furniture",
+    "Gifts, Decors, Handicrafts", "Horticulture and Agriculture",
+    "Metals & Engineering", "Others",
+    "Others (Health Products & Services/Pharma)", "Others (Health Products)",
+    "Others (ICT)", "Others (Laboratory Analysis)", "Others (Lime Processing)",
     "Others (Materials Testing and Structural Analysis)",
 ]
 OWNERSHIPS = ["Cooperative", "Corporation", "Partnership", "Single"]
@@ -81,8 +116,6 @@ except Exception as e:
 
 # ─────────────────────────────────────────────
 # Mock database
-# Replace search_applicants() and fetch_applicant()
-# with real DB queries when your API is ready.
 # ─────────────────────────────────────────────
 MOCK_DB = [
     {"id": "APP-2024-001", "name": "Nick's Food Enterprise",       "year": 2024, "cost": 692282,  "province": "Negros",   "sector": "Food Processing",               "ownership": "Single",      "size": "micro",  "prior_funding": "Yes"},
@@ -146,219 +179,286 @@ def result_card(label, value, bg, border, text_color):
         unsafe_allow_html=True,
     )
 
+def status_badge(tier_name: str) -> str:
+    if tier_name in ("Low Risk",):
+        return f'<span class="badge-compliant">Compliant</span>'
+    elif tier_name == "Medium Risk":
+        return f'<span class="badge-medium">Medium Risk</span>'
+    elif tier_name == "High Risk":
+        return f'<span class="badge-delinquent">Delinquent</span>'
+    else:
+        return f'<span class="badge-critical">Critical</span>'
+
 # ─────────────────────────────────────────────
-# Session state init
+# Session state
 # ─────────────────────────────────────────────
 if "selected_applicant" not in st.session_state:
     st.session_state.selected_applicant = None
 if "raw_query" not in st.session_state:
     st.session_state.raw_query = ""
+if "assessed_log" not in st.session_state:
+    st.session_state.assessed_log = []   # list of dicts, one per assessment
 
 # ─────────────────────────────────────────────
-# UI — header
+# Two-column layout: form left, log right
 # ─────────────────────────────────────────────
-st.title("MSME Delinquency Risk Assessment")
-st.caption("Western Visayas · Loan-funded project screening")
-st.divider()
+left_col, right_col = st.columns([1, 1], gap="large")
+
+with left_col:
+    st.title("MSME Delinquency Risk Assessment")
+    st.caption("Western Visayas · Loan-funded project screening")
+    st.divider()
+
+    # ── Search ───────────────────────────────
+    st.subheader("Search applicant")
+    applicant = st.session_state.selected_applicant
+
+    if applicant:
+        col_badge, col_clear = st.columns([5, 1])
+        with col_badge:
+            st.markdown(
+                f"""<div style="background:#F0F4FF;border:1px solid #C7D4F5;border-radius:10px;
+                                padding:10px 16px;">
+                        <span style="font-size:16px;">🏢</span>
+                        <strong style="margin-left:8px;">{applicant['name']}</strong>
+                        <span style="font-size:12px;color:#666;margin-left:8px;">
+                            {applicant['id']} · Pre-PIS data loaded</span>
+                    </div>""",
+                unsafe_allow_html=True,
+            )
+        with col_clear:
+            st.markdown("<div style='margin-top:6px'>", unsafe_allow_html=True)
+            if st.button("✕ Clear", use_container_width=True):
+                st.session_state.selected_applicant = None
+                st.session_state.raw_query = ""
+                st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+    else:
+        query_input = st.text_input(
+            label="Search applicant",
+            value=st.session_state.raw_query,
+            placeholder="Type MSME name or application ID…",
+            label_visibility="collapsed",
+        )
+        st.session_state.raw_query = query_input
+
+        if query_input and len(query_input) >= 2:
+            results = search_applicants(query_input)
+            if results:
+                for r in results:
+                    col_name, col_btn = st.columns([6, 1])
+                    with col_name:
+                        st.markdown(
+                            f"<div style='padding:4px 4px;'>"
+                            f"<span style='font-weight:500;font-size:14px;'>{r['name']}</span>"
+                            f"<span style='font-size:12px;color:#888;margin-left:10px;'>"
+                            f"{r['id']} · {r['province']} · {r['sector']}</span></div>",
+                            unsafe_allow_html=True,
+                        )
+                    with col_btn:
+                        if st.button("Select", key=f"btn_{r['id']}", use_container_width=True):
+                            st.session_state.selected_applicant = fetch_applicant(r["id"])
+                            st.session_state.raw_query = ""
+                            st.rerun()
+            else:
+                st.caption("No matching applicants found.")
+
+    st.divider()
+
+    # ── Form ─────────────────────────────────
+    st.subheader("Applicant details")
+    if applicant:
+        st.caption("Auto-filled from Pre-PIS record. You may adjust before assessing.")
+    else:
+        st.caption("Select an applicant above to auto-fill, or enter details manually.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        year = st.number_input("Year", min_value=2000, max_value=2030, step=1,
+                               value=int(applicant["year"]) if applicant else 2024)
+    with col2:
+        cost_raw = st.number_input("Project cost (₱)", min_value=0.0, step=1000.0, format="%.2f",
+                                   value=float(applicant["cost"]) if applicant else 150000.0)
+
+    col3, col4 = st.columns(2)
+    with col3:
+        province = st.selectbox("Province", PROVINCES,
+            index=PROVINCES.index(applicant["province"]) if applicant and applicant["province"] in PROVINCES else 0)
+    with col4:
+        sector = st.selectbox("Sector", SECTORS,
+            index=SECTORS.index(applicant["sector"]) if applicant and applicant["sector"] in SECTORS else 0)
+
+    col5, col6, col7 = st.columns(3)
+    with col5:
+        ownership = st.selectbox("Ownership type", OWNERSHIPS,
+            index=OWNERSHIPS.index(applicant["ownership"]) if applicant and applicant["ownership"] in OWNERSHIPS else 0)
+    with col6:
+        size_options = [s.capitalize() for s in SIZES]
+        size_val = applicant["size"].capitalize() if applicant else "Micro"
+        size_display = st.selectbox("Enterprise size", size_options,
+            index=size_options.index(size_val) if size_val in size_options else 0)
+        size = size_display.lower()
+    with col7:
+        prior_options = ["Yes", "No"]
+        prior_val = applicant["prior_funding"] if applicant else "Yes"
+        prior_funding = st.selectbox("Prior funding", prior_options,
+            index=prior_options.index(prior_val) if prior_val in prior_options else 0)
+
+    st.divider()
+
+    # ── Predict ──────────────────────────────
+    if st.button("Assess delinquency risk", use_container_width=True, type="primary"):
+        X = build_feature_vector(year, cost_raw, province, sector, ownership, size, prior_funding)
+
+        try:
+            pred_class      = skl_model.predict(X)[0]
+            proba           = skl_model.predict_proba(X)[0]
+            p_completed     = float(proba[0])
+            p_not_completed = float(proba[1])
+            delinquency_pct = round(p_not_completed * 100)
+            completed_pct   = round(p_completed * 100)
+            is_completed    = pred_class == 0.0
+
+            tier_name, tier_icon, bg, border, text_color = get_risk_tier(delinquency_pct)
+
+            # ── Result display ────────────────
+            st.subheader("Risk assessment result")
+            if applicant:
+                st.caption(f"Assessment for: **{applicant['name']}** ({applicant['id']})")
+
+            r1, r2 = st.columns(2)
+            with r1:
+                icon = "✅" if is_completed else "❌"
+                text = "Completed" if is_completed else "Not Completed"
+                result_card("Predicted outcome", f"{icon} {text}", bg, border, text_color)
+            with r2:
+                result_card("Delinquency risk tier", f"{tier_icon} {tier_name}", bg, border, text_color)
+
+            st.markdown("")
+            st.markdown(f"**Delinquency probability: {delinquency_pct}%**")
+            st.progress(delinquency_pct / 100,
+                        text=f"{tier_icon} {tier_name} — {delinquency_pct}% likelihood of non-completion")
+
+            st.markdown("")
+            p1, p2 = st.columns(2)
+            with p1:
+                st.metric("✅ Probability of completion", f"{completed_pct}%")
+            with p2:
+                st.metric("❌ Probability of delinquency", f"{delinquency_pct}%")
+
+            st.markdown("")
+            actions = {
+                "Low Risk":    ("✅ Safe to approve.", "#EAF3DE", "#97C459"),
+                "Medium Risk": ("⚠️ Approve with close monitoring.", "#FAEEDA", "#EF9F27"),
+                "High Risk":   ("🚩 Additional review required before approval.", "#FAECE7", "#F0997B"),
+                "Critical":    ("🚨 High default risk — escalate to senior review.", "#FCEBEB", "#F09595"),
+            }
+            action_text, a_bg, a_border = actions[tier_name]
+            st.markdown(
+                f"""<div style="background:{a_bg};border:1.5px solid {a_border};border-radius:10px;
+                                padding:12px 16px;font-size:14px;font-weight:500;">
+                        {action_text}
+                    </div>""",
+                unsafe_allow_html=True,
+            )
+
+            # ── Append to assessed log ────────
+            msme_name = applicant["name"] if applicant else "Manual Entry"
+            msme_type = applicant["ownership"] if applicant else ownership
+
+            # Avoid duplicate entries for the same MSME in the same session
+            existing_ids = [e["id"] for e in st.session_state.assessed_log]
+            entry_id = applicant["id"] if applicant else f"MANUAL-{len(st.session_state.assessed_log)+1}"
+
+            entry = {
+                "id": entry_id,
+                "name": msme_name,
+                "province": province,
+                "sector": sector,
+                "msme_type": size_display,
+                "risk_score": delinquency_pct,
+                "tier": tier_name,
+                "is_completed": is_completed,
+            }
+
+            # Update if already assessed, otherwise append
+            if entry_id in existing_ids:
+                idx = existing_ids.index(entry_id)
+                st.session_state.assessed_log[idx] = entry
+            else:
+                st.session_state.assessed_log.append(entry)
+
+        except Exception as e:
+            st.error(f"Prediction failed. Please check the input values and try again.\n\n`{e}`")
 
 # ─────────────────────────────────────────────
-# Search — uses raw_query (NOT a widget key)
-# Avoids the Streamlit restriction on setting
-# widget-bound session state inside callbacks.
+# Right column — assessed MSME log
 # ─────────────────────────────────────────────
-st.subheader("Search applicant")
+with right_col:
+    st.title("Assessed MSMEs")
+    st.caption("All assessments made in this session")
+    st.divider()
 
-# If an applicant is selected, show their name as a read-only badge
-# and a "Clear" button to search again
-applicant = st.session_state.selected_applicant
+    log = st.session_state.assessed_log
 
-if applicant:
-    col_badge, col_clear = st.columns([5, 1])
-    with col_badge:
+    if not log:
         st.markdown(
-            f"""<div style="background:#F0F4FF;border:1px solid #C7D4F5;border-radius:10px;
-                            padding:10px 16px;">
-                    <span style="font-size:16px;">🏢</span>
-                    <strong style="margin-left:8px;">{applicant['name']}</strong>
-                    <span style="font-size:12px;color:#666;margin-left:8px;">
-                        {applicant['id']} · Pre-PIS data loaded</span>
-                </div>""",
+            """<div style="text-align:center;padding:3rem 1rem;color:#aaa;">
+                <div style="font-size:40px;margin-bottom:12px;">📋</div>
+                <div style="font-size:14px;">No assessments yet.<br>
+                Search and assess an MSME on the left to see results here.</div>
+            </div>""",
             unsafe_allow_html=True,
         )
-    with col_clear:
-        st.markdown("<div style='margin-top:6px'>", unsafe_allow_html=True)
-        if st.button("✕ Clear", use_container_width=True):
-            st.session_state.selected_applicant = None
-            st.session_state.raw_query = ""
+    else:
+        # Summary stats
+        total     = len(log)
+        compliant = sum(1 for e in log if e["tier"] == "Low Risk")
+        at_risk   = total - compliant
+        avg_risk  = round(sum(e["risk_score"] for e in log) / total)
+
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Total assessed", total)
+        s2.metric("At risk", at_risk)
+        s3.metric("Avg. delinquency %", f"{avg_risk}%")
+        st.markdown("")
+
+        # Clear log button
+        if st.button("🗑️ Clear log", use_container_width=False):
+            st.session_state.assessed_log = []
             st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-
-else:
-    # Free-text search box — value stored in raw_query, NOT bound to a widget key
-    query_input = st.text_input(
-        label="Search applicant",
-        value=st.session_state.raw_query,
-        placeholder="Type MSME name or application ID…",
-        label_visibility="collapsed",
-    )
-
-    # Persist whatever the user typed
-    st.session_state.raw_query = query_input
-
-    # Show matching results
-    if query_input and len(query_input) >= 2:
-        results = search_applicants(query_input)
-        if results:
-            for r in results:
-                col_name, col_btn = st.columns([6, 1])
-                with col_name:
-                    st.markdown(
-                        f"<div style='padding:4px 4px;'>"
-                        f"<span style='font-weight:500;font-size:14px;'>{r['name']}</span>"
-                        f"<span style='font-size:12px;color:#888;margin-left:10px;'>"
-                        f"{r['id']} · {r['province']} · {r['sector']}</span></div>",
-                        unsafe_allow_html=True,
-                    )
-                with col_btn:
-                    if st.button("Select", key=f"btn_{r['id']}", use_container_width=True):
-                        st.session_state.selected_applicant = fetch_applicant(r["id"])
-                        st.session_state.raw_query = ""
-                        st.rerun()
-        else:
-            st.caption("No matching applicants found.")
-
-st.divider()
-
-# ─────────────────────────────────────────────
-# Form — auto-filled if applicant selected
-# ─────────────────────────────────────────────
-st.subheader("Applicant details")
-if applicant:
-    st.caption("Auto-filled from Pre-PIS record. You may adjust before assessing.")
-else:
-    st.caption("Select an applicant above to auto-fill, or enter details manually.")
-
-col1, col2 = st.columns(2)
-with col1:
-    year = st.number_input(
-        "Year", min_value=2000, max_value=2030, step=1,
-        value=int(applicant["year"]) if applicant else 2024,
-    )
-with col2:
-    cost_raw = st.number_input(
-        "Project cost (₱)", min_value=0.0, step=1000.0, format="%.2f",
-        value=float(applicant["cost"]) if applicant else 150000.0,
-    )
-
-col3, col4 = st.columns(2)
-with col3:
-    province = st.selectbox(
-        "Province", PROVINCES,
-        index=PROVINCES.index(applicant["province"])
-              if applicant and applicant["province"] in PROVINCES else 0,
-    )
-with col4:
-    sector = st.selectbox(
-        "Sector", SECTORS,
-        index=SECTORS.index(applicant["sector"])
-              if applicant and applicant["sector"] in SECTORS else 0,
-    )
-
-col5, col6, col7 = st.columns(3)
-with col5:
-    ownership = st.selectbox(
-        "Ownership type", OWNERSHIPS,
-        index=OWNERSHIPS.index(applicant["ownership"])
-              if applicant and applicant["ownership"] in OWNERSHIPS else 0,
-    )
-with col6:
-    size_options = [s.capitalize() for s in SIZES]
-    size_val = applicant["size"].capitalize() if applicant else "Micro"
-    size_display = st.selectbox(
-        "Enterprise size", size_options,
-        index=size_options.index(size_val) if size_val in size_options else 0,
-    )
-    size = size_display.lower()
-with col7:
-    prior_options = ["Yes", "No"]
-    prior_val = applicant["prior_funding"] if applicant else "Yes"
-    prior_funding = st.selectbox(
-        "Prior funding", prior_options,
-        index=prior_options.index(prior_val) if prior_val in prior_options else 0,
-    )
-
-st.divider()
-
-# ─────────────────────────────────────────────
-# Predict
-# ─────────────────────────────────────────────
-if st.button("Assess delinquency risk", use_container_width=True, type="primary"):
-    X = build_feature_vector(year, cost_raw, province, sector, ownership, size, prior_funding)
-
-    try:
-        pred_class      = skl_model.predict(X)[0]
-        proba           = skl_model.predict_proba(X)[0]
-        p_completed     = float(proba[0])
-        p_not_completed = float(proba[1])
-        delinquency_pct = round(p_not_completed * 100)
-        completed_pct   = round(p_completed * 100)
-        is_completed    = pred_class == 0.0
-
-        tier_name, tier_icon, bg, border, text_color = get_risk_tier(delinquency_pct)
-
-        st.subheader("Risk assessment result")
-        if applicant:
-            st.caption(f"Assessment for: **{applicant['name']}** ({applicant['id']})")
-
-        r1, r2 = st.columns(2)
-        with r1:
-            icon = "✅" if is_completed else "❌"
-            text = "Completed" if is_completed else "Not Completed"
-            result_card("Predicted outcome", f"{icon} {text}", bg, border, text_color)
-        with r2:
-            result_card("Delinquency risk tier", f"{tier_icon} {tier_name}", bg, border, text_color)
 
         st.markdown("")
-        st.markdown(f"**Delinquency probability: {delinquency_pct}%**")
-        st.progress(
-            delinquency_pct / 100,
-            text=f"{tier_icon} {tier_name} — {delinquency_pct}% likelihood of non-completion",
-        )
 
-        st.markdown("")
-        p1, p2 = st.columns(2)
-        with p1:
-            st.metric("✅ Probability of completion", f"{completed_pct}%")
-        with p2:
-            st.metric("❌ Probability of delinquency", f"{delinquency_pct}%")
+        # Build HTML table
+        rows_html = ""
+        for i, e in enumerate(log, start=1):
+            badge = status_badge(e["tier"])
+            rows_html += f"""
+            <tr>
+                <td class="row-num">{i}</td>
+                <td class="msme-name">{e['name']}</td>
+                <td>{e['province']}</td>
+                <td>{e['sector']}</td>
+                <td>{e['msme_type'].capitalize()}</td>
+                <td><strong>{e['risk_score']}%</strong></td>
+                <td>{badge}</td>
+            </tr>"""
 
-        st.markdown("")
-        actions = {
-            "Low Risk":    ("✅ Safe to approve.", "#EAF3DE", "#97C459"),
-            "Medium Risk": ("⚠️ Approve with close monitoring.", "#FAEEDA", "#EF9F27"),
-            "High Risk":   ("🚩 Additional review required before approval.", "#FAECE7", "#F0997B"),
-            "Critical":    ("🚨 High default risk — escalate to senior review.", "#FCEBEB", "#F09595"),
-        }
-        action_text, a_bg, a_border = actions[tier_name]
-        st.markdown(
-            f"""<div style="background:{a_bg};border:1.5px solid {a_border};border-radius:10px;
-                            padding:12px 16px;font-size:14px;font-weight:500;margin-top:4px;">
-                    {action_text}
-                </div>""",
-            unsafe_allow_html=True,
-        )
+        table_html = f"""
+        <table class="assessed-table">
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>MSME</th>
+                    <th>Province</th>
+                    <th>Sector</th>
+                    <th>MSME Type</th>
+                    <th>Risk Score %</th>
+                    <th>Predicted Status</th>
+                </tr>
+            </thead>
+            <tbody>{rows_html}</tbody>
+        </table>"""
 
-        st.markdown("")
-        st.markdown("""
-**Risk tier guide**
-
-| Tier | Delinquency probability | Recommended action |
-|------|------------------------|--------------------|
-| 🟢 Low Risk     | 0 – 30%   | Safe to approve |
-| 🟡 Medium Risk  | 31 – 50%  | Approve with monitoring |
-| 🟠 High Risk    | 51 – 70%  | Additional review required |
-| 🔴 Critical     | 71 – 100% | High default risk — escalate |
-        """)
-
-    except Exception as e:
-        st.error(f"Prediction failed. Please check the input values and try again.\n\n`{e}`")
+        st.markdown(table_html, unsafe_allow_html=True)
