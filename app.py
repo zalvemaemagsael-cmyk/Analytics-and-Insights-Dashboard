@@ -28,13 +28,6 @@ st.markdown("""
         [data-testid="stSidebar"] { display: none; }
         [data-testid="collapsedControl"] { display: none; }
         .block-container { max-width: 720px; padding-top: 2rem; }
-        .applicant-card {
-            background: #F0F4FF;
-            border: 1px solid #C7D4F5;
-            border-radius: 10px;
-            padding: 10px 16px;
-            margin: 8px 0 16px 0;
-        }
     </style>
 """, unsafe_allow_html=True)
 
@@ -154,28 +147,12 @@ def result_card(label, value, bg, border, text_color):
     )
 
 # ─────────────────────────────────────────────
-# Session state
+# Session state init
 # ─────────────────────────────────────────────
-for key, default in [
-    ("selected_applicant", None),
-    ("search_query", ""),
-]:
-    if key not in st.session_state:
-        st.session_state[key] = default
-
-def on_search_change():
-    """Clears selected applicant when user edits the search box."""
-    if st.session_state.search_input != (
-        st.session_state.selected_applicant["name"]
-        if st.session_state.selected_applicant else ""
-    ):
-        st.session_state.selected_applicant = None
-
-def select_applicant(applicant_id):
-    applicant = fetch_applicant(applicant_id)
-    if applicant:
-        st.session_state.selected_applicant = applicant
-        st.session_state.search_input = applicant["name"]
+if "selected_applicant" not in st.session_state:
+    st.session_state.selected_applicant = None
+if "raw_query" not in st.session_state:
+    st.session_state.raw_query = ""
 
 # ─────────────────────────────────────────────
 # UI — header
@@ -185,57 +162,70 @@ st.caption("Western Visayas · Loan-funded project screening")
 st.divider()
 
 # ─────────────────────────────────────────────
-# Search box — on_change fires on every keystroke
+# Search — uses raw_query (NOT a widget key)
+# Avoids the Streamlit restriction on setting
+# widget-bound session state inside callbacks.
 # ─────────────────────────────────────────────
 st.subheader("Search applicant")
 
-if "search_input" not in st.session_state:
-    st.session_state.search_input = ""
-
-st.text_input(
-    label="Search applicant",
-    key="search_input",
-    placeholder="Type MSME name or application ID…",
-    label_visibility="collapsed",
-    on_change=on_search_change,
-)
-
-query = st.session_state.search_input
+# If an applicant is selected, show their name as a read-only badge
+# and a "Clear" button to search again
 applicant = st.session_state.selected_applicant
 
-# Show results only when no applicant is selected yet
-if query and len(query) >= 2 and not applicant:
-    results = search_applicants(query)
-    if results:
-        for r in results:
-            col_name, col_btn = st.columns([6, 1])
-            with col_name:
-                st.markdown(
-                    f"<div style='padding:6px 4px;'>"
-                    f"<span style='font-weight:500;font-size:14px;'>{r['name']}</span>"
-                    f"<span style='font-size:12px;color:#888;margin-left:10px;'>"
-                    f"{r['id']} · {r['province']} · {r['sector']}</span></div>",
-                    unsafe_allow_html=True,
-                )
-            with col_btn:
-                if st.button("Select", key=f"btn_{r['id']}", use_container_width=True):
-                    select_applicant(r["id"])
-                    st.rerun()
-    else:
-        st.caption("No matching applicants found.")
-
-# Selected applicant badge
 if applicant:
-    st.markdown(
-        f"""<div style="background:#F0F4FF;border:1px solid #C7D4F5;border-radius:10px;
-                        padding:10px 16px;margin:8px 0 4px 0;">
-                <span style="font-size:18px;">🏢</span>
-                <strong style="margin-left:8px;">{applicant['name']}</strong>
-                <span style="font-size:12px;color:#666;margin-left:8px;">
-                    {applicant['id']} · Pre-PIS data loaded</span>
-            </div>""",
-        unsafe_allow_html=True,
+    col_badge, col_clear = st.columns([5, 1])
+    with col_badge:
+        st.markdown(
+            f"""<div style="background:#F0F4FF;border:1px solid #C7D4F5;border-radius:10px;
+                            padding:10px 16px;">
+                    <span style="font-size:16px;">🏢</span>
+                    <strong style="margin-left:8px;">{applicant['name']}</strong>
+                    <span style="font-size:12px;color:#666;margin-left:8px;">
+                        {applicant['id']} · Pre-PIS data loaded</span>
+                </div>""",
+            unsafe_allow_html=True,
+        )
+    with col_clear:
+        st.markdown("<div style='margin-top:6px'>", unsafe_allow_html=True)
+        if st.button("✕ Clear", use_container_width=True):
+            st.session_state.selected_applicant = None
+            st.session_state.raw_query = ""
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+else:
+    # Free-text search box — value stored in raw_query, NOT bound to a widget key
+    query_input = st.text_input(
+        label="Search applicant",
+        value=st.session_state.raw_query,
+        placeholder="Type MSME name or application ID…",
+        label_visibility="collapsed",
     )
+
+    # Persist whatever the user typed
+    st.session_state.raw_query = query_input
+
+    # Show matching results
+    if query_input and len(query_input) >= 2:
+        results = search_applicants(query_input)
+        if results:
+            for r in results:
+                col_name, col_btn = st.columns([6, 1])
+                with col_name:
+                    st.markdown(
+                        f"<div style='padding:4px 4px;'>"
+                        f"<span style='font-weight:500;font-size:14px;'>{r['name']}</span>"
+                        f"<span style='font-size:12px;color:#888;margin-left:10px;'>"
+                        f"{r['id']} · {r['province']} · {r['sector']}</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                with col_btn:
+                    if st.button("Select", key=f"btn_{r['id']}", use_container_width=True):
+                        st.session_state.selected_applicant = fetch_applicant(r["id"])
+                        st.session_state.raw_query = ""
+                        st.rerun()
+        else:
+            st.caption("No matching applicants found.")
 
 st.divider()
 
