@@ -1,7 +1,12 @@
 """
 MSME Project Completion & Delinquency Risk Predictor
 Streamlit app — Western Visayas, Loan-funded MSME projects
-Model: Logistic Regression trained in Orange Data Mining (.pkcls)
+
+Deployment structure:
+    /your-app-folder/
+        app.py
+        logisticregression.pkcls
+        requirements.txt
 """
 
 import streamlit as st
@@ -18,11 +23,20 @@ st.set_page_config(
     layout="centered",
 )
 
+# Hide sidebar entirely
+st.markdown("""
+    <style>
+        [data-testid="stSidebar"] { display: none; }
+        [data-testid="collapsedControl"] { display: none; }
+        .block-container { max-width: 720px; padding-top: 2rem; }
+    </style>
+""", unsafe_allow_html=True)
+
 # ─────────────────────────────────────────────
 # Constants — must match Orange preprocessing order exactly
 # ─────────────────────────────────────────────
-PROVINCES   = ["Aklan", "Antique", "Capiz", "Guimaras", "Iloilo", "Negros"]
-SECTORS     = [
+PROVINCES  = ["Aklan", "Antique", "Capiz", "Guimaras", "Iloilo", "Negros"]
+SECTORS    = [
     "Agriculture/Marine/Aquaculture",
     "Food Processing",
     "Furniture",
@@ -37,8 +51,8 @@ SECTORS     = [
     "Others (Lime Processing)",
     "Others (Materials Testing and Structural Analysis)",
 ]
-OWNERSHIPS  = ["Cooperative", "Corporation", "Partnership", "Single"]
-SIZES       = ["micro", "small", "medium"]
+OWNERSHIPS = ["Cooperative", "Corporation", "Partnership", "Single"]
+SIZES      = ["micro", "small", "medium"]
 
 FEATURE_NAMES = (
     ["Project_Cost", "Year"]
@@ -47,149 +61,69 @@ FEATURE_NAMES = (
     + [f"type_of_ownership={o}" for o in OWNERSHIPS]
     + [f"size_of_enterprise={s}" for s in SIZES]
     + ["Has_Prior_Funding=False", "Has_Prior_Funding=True"]
-)  # 30 features total
-
+)
 
 # ─────────────────────────────────────────────
-# Model loader (cached)
+# Model — loaded once at startup
 # ─────────────────────────────────────────────
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "logisticregression.pkcls")
+
 @st.cache_resource
-def load_model(model_path: str):
-    with open(model_path, "rb") as f:
+def load_model():
+    with open(MODEL_PATH, "rb") as f:
         orange_model = pickle.load(f)
-    return orange_model
-
-
-def get_skl_model(orange_model):
-    """Extract the underlying sklearn model from an Orange classifier."""
     return orange_model.skl_model
 
+try:
+    skl_model = load_model()
+except Exception as e:
+    st.error(f"⚠️ Model could not be loaded. Contact your system administrator.\n\n`{e}`")
+    st.stop()
 
 # ─────────────────────────────────────────────
-# Feature builder
+# Helpers
 # ─────────────────────────────────────────────
 def build_feature_vector(year, cost_raw, province, sector, ownership, size, prior_funding):
-    """
-    Converts raw form inputs into the 30-feature one-hot vector
-    that matches the Orange preprocessing pipeline.
-
-    Feature order:
-      [0]  Project_Cost  (normalized: raw / 1,000,000)
-      [1]  Year          (raw integer)
-      [2-7]   Province one-hot (6)
-      [8-20]  Sector one-hot  (13)
-      [21-24] type_of_ownership one-hot (4)
-      [25-27] size_of_enterprise one-hot (3)
-      [28]  Has_Prior_Funding=False
-      [29]  Has_Prior_Funding=True
-    """
-    cost_norm = cost_raw / 1_000_000
-
-    X = [cost_norm, float(year)]
+    X = [cost_raw / 1_000_000, float(year)]
     X += [1 if province == p else 0 for p in PROVINCES]
     X += [1 if sector == s else 0 for s in SECTORS]
     X += [1 if ownership == o else 0 for o in OWNERSHIPS]
     X += [1 if size == s else 0 for s in SIZES]
-    X += [1 if prior_funding == "No" else 0]   # Has_Prior_Funding=False
-    X += [1 if prior_funding == "Yes" else 0]  # Has_Prior_Funding=True
-
+    X += [1 if prior_funding == "No" else 0]
+    X += [1 if prior_funding == "Yes" else 0]
     return np.array(X, dtype=float).reshape(1, -1)
 
 
-# ─────────────────────────────────────────────
-# Risk tier helper
-# ─────────────────────────────────────────────
-def get_risk_tier(delinquency_pct: int):
-    if delinquency_pct <= 30:
-        return "🟢 Low Risk", "success"
-    elif delinquency_pct <= 50:
-        return "🟡 Medium Risk", "warning"
-    elif delinquency_pct <= 70:
-        return "🟠 High Risk", "warning"
-    else:
-        return "🔴 Critical", "error"
+def get_risk_tier(pct: int):
+    if pct <= 30: return "Low Risk",    "🟢", "#EAF3DE", "#97C459", "#2B5C0A"
+    if pct <= 50: return "Medium Risk", "🟡", "#FAEEDA", "#EF9F27", "#7A4209"
+    if pct <= 70: return "High Risk",   "🟠", "#FAECE7", "#F0997B", "#7A2A0A"
+    return             "Critical",   "🔴", "#FCEBEB", "#F09595", "#6B1010"
 
 
-# ─────────────────────────────────────────────
-# Styling helpers
-# ─────────────────────────────────────────────
-TIER_COLORS = {
-    "🟢 Low Risk":    "#EAF3DE",
-    "🟡 Medium Risk": "#FAEEDA",
-    "🟠 High Risk":   "#FAECE7",
-    "🔴 Critical":    "#FCEBEB",
-}
-TIER_BORDER = {
-    "🟢 Low Risk":    "#97C459",
-    "🟡 Medium Risk": "#EF9F27",
-    "🟠 High Risk":   "#F0997B",
-    "🔴 Critical":    "#F09595",
-}
-
-
-def colored_metric(label, value, bg, border):
+def result_card(label, value, bg, border, text_color):
     st.markdown(
-        f"""
-        <div style="background:{bg};border:1px solid {border};border-radius:10px;
-                    padding:14px 18px;text-align:center;margin-bottom:10px;">
-            <div style="font-size:12px;font-weight:500;color:#555;margin-bottom:4px;">{label}</div>
-            <div style="font-size:24px;font-weight:600;">{value}</div>
-        </div>
-        """,
+        f"""<div style="background:{bg};border:1.5px solid {border};border-radius:12px;
+                        padding:16px 20px;text-align:center;">
+                <div style="font-size:12px;font-weight:500;color:#666;
+                            text-transform:uppercase;letter-spacing:0.05em;
+                            margin-bottom:6px;">{label}</div>
+                <div style="font-size:22px;font-weight:600;color:{text_color};">{value}</div>
+            </div>""",
         unsafe_allow_html=True,
     )
 
-
 # ─────────────────────────────────────────────
-# App UI
+# UI — header
 # ─────────────────────────────────────────────
-st.title("🛡️ MSME Delinquency Risk Predictor")
-st.caption("Western Visayas · Loan-funded project screening · Logistic Regression")
+st.title("MSME Delinquency Risk Assessment")
+st.caption("Western Visayas · Loan-funded project screening")
 st.divider()
 
-# ── Sidebar: model upload ──────────────────────
-with st.sidebar:
-    st.header("⚙️ Model")
-    uploaded_pkl = st.file_uploader(
-        "Upload trained model (.pkcls / .pkl)",
-        type=["pkcls", "pkl", "pickle"],
-        help="Upload your Orange-trained logistic regression classifier.",
-    )
-
-    model = None
-    skl_model = None
-
-    if uploaded_pkl is not None:
-        tmp_path = f"/tmp/{uploaded_pkl.name}"
-        with open(tmp_path, "wb") as f:
-            f.write(uploaded_pkl.read())
-        try:
-            model = load_model(tmp_path)
-            skl_model = get_skl_model(model)
-            st.success(f"✅ Model loaded: `{uploaded_pkl.name}`")
-        except Exception as e:
-            st.error(f"❌ Failed to load model: {e}")
-    else:
-        st.info("Upload your `.pkcls` model file to enable predictions.")
-
-    st.divider()
-    st.markdown("**Model details**")
-    st.markdown("- Algorithm: Logistic Regression")
-    st.markdown("- Training instances: 321")
-    st.markdown("- Features: 30 (one-hot encoded)")
-    st.markdown("- Target: Completed / Not Completed")
-    st.markdown("- Source: Orange Data Mining")
-
-    with st.expander("📋 Feature list"):
-        for i, name in enumerate(FEATURE_NAMES):
-            st.markdown(f"`{i+1}.` {name}")
-
-# ── Main: applicant form ───────────────────────
-st.subheader("📋 Applicant details")
-st.caption(
-    "Fill in the Pre-PIS form data below. "
-    "When connected to your internal system, these fields will auto-populate."
-)
+# ─────────────────────────────────────────────
+# Form
+# ─────────────────────────────────────────────
+st.subheader("Applicant details")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -209,100 +143,89 @@ col5, col6, col7 = st.columns(3)
 with col5:
     ownership = st.selectbox("Ownership type", OWNERSHIPS)
 with col6:
-    size = st.selectbox("Enterprise size", [s.capitalize() for s in SIZES])
-    size = size.lower()
+    size_display = st.selectbox("Enterprise size", [s.capitalize() for s in SIZES])
+    size = size_display.lower()
 with col7:
     prior_funding = st.selectbox("Prior funding", ["Yes", "No"])
 
 st.divider()
 
-# ── Prediction ─────────────────────────────────
-predict_btn = st.button("🔍 Assess delinquency risk", use_container_width=True, type="primary")
+# ─────────────────────────────────────────────
+# Predict
+# ─────────────────────────────────────────────
+if st.button("Assess delinquency risk", use_container_width=True, type="primary"):
+    X = build_feature_vector(year, cost_raw, province, sector, ownership, size, prior_funding)
 
-if predict_btn:
-    if skl_model is None:
-        st.error("⚠️ Please upload your trained model (.pkcls) in the sidebar first.")
-    else:
-        X = build_feature_vector(year, cost_raw, province, sector, ownership, size, prior_funding)
+    try:
+        pred_class      = skl_model.predict(X)[0]
+        proba           = skl_model.predict_proba(X)[0]
+        p_completed     = float(proba[0])
+        p_not_completed = float(proba[1])
+        delinquency_pct = round(p_not_completed * 100)
+        completed_pct   = round(p_completed * 100)
+        is_completed    = pred_class == 0.0
 
-        try:
-            pred_class = skl_model.predict(X)[0]          # 0.0 = Completed, 1.0 = Not Completed
-            proba      = skl_model.predict_proba(X)[0]    # [P(Completed), P(Not Completed)]
+        tier_name, tier_icon, bg, border, text_color = get_risk_tier(delinquency_pct)
 
-            p_completed     = float(proba[0])
-            p_not_completed = float(proba[1])
-            delinquency_pct = round(p_not_completed * 100)
-            completed_pct   = round(p_completed * 100)
-            is_completed    = pred_class == 0.0
+        st.subheader("Risk assessment result")
 
-            tier_label, tier_type = get_risk_tier(delinquency_pct)
-            bg     = TIER_COLORS[tier_label]
-            border = TIER_BORDER[tier_label]
+        # Outcome + tier
+        c1, c2 = st.columns(2)
+        with c1:
+            outcome_icon = "✅" if is_completed else "❌"
+            outcome_text = "Completed" if is_completed else "Not Completed"
+            result_card("Predicted outcome", f"{outcome_icon} {outcome_text}", bg, border, text_color)
+        with c2:
+            result_card("Delinquency risk tier", f"{tier_icon} {tier_name}", bg, border, text_color)
 
-            # ── Result display ─────────────────
-            st.subheader("📊 Risk assessment result")
+        st.markdown("")
 
-            r1, r2 = st.columns(2)
-            with r1:
-                outcome_icon = "✅" if is_completed else "❌"
-                outcome_text = "Completed" if is_completed else "Not Completed"
-                colored_metric(
-                    "Predicted outcome",
-                    f"{outcome_icon} {outcome_text}",
-                    bg, border,
-                )
-            with r2:
-                colored_metric("Delinquency risk tier", tier_label, bg, border)
+        # Delinquency probability meter
+        st.markdown(f"**Delinquency probability: {delinquency_pct}%**")
+        st.progress(
+            delinquency_pct / 100,
+            text=f"{tier_icon} {tier_name} — {delinquency_pct}% likelihood of non-completion",
+        )
 
-            # Delinquency probability meter
-            st.markdown("**Delinquency probability**")
-            st.progress(
-                delinquency_pct / 100,
-                text=f"{delinquency_pct}% — {tier_label}",
-            )
+        st.markdown("")
 
-            # Probability breakdown
-            st.markdown("**Probability breakdown**")
-            b1, b2 = st.columns(2)
-            with b1:
-                st.metric("✅ P(Completed)", f"{completed_pct}%")
-            with b2:
-                st.metric("❌ P(Not Completed)", f"{delinquency_pct}%")
+        # Probability breakdown
+        p1, p2 = st.columns(2)
+        with p1:
+            st.metric(label="✅ Probability of completion", value=f"{completed_pct}%")
+        with p2:
+            st.metric(label="❌ Probability of delinquency", value=f"{delinquency_pct}%")
 
-            # Risk tier legend
-            with st.expander("📖 Risk tier guide"):
-                st.markdown(
-                    """
+        # Recommended action
+        st.markdown("")
+        actions = {
+            "Low Risk":    ("✅ Safe to approve.", "#EAF3DE", "#97C459"),
+            "Medium Risk": ("⚠️ Approve with close monitoring.", "#FAEEDA", "#EF9F27"),
+            "High Risk":   ("🚩 Additional review required before approval.", "#FAECE7", "#F0997B"),
+            "Critical":    ("🚨 High default risk — escalate to senior review.", "#FCEBEB", "#F09595"),
+        }
+        action_text, a_bg, a_border = actions[tier_name]
+        st.markdown(
+            f"""<div style="background:{a_bg};border:1.5px solid {a_border};
+                            border-radius:10px;padding:12px 16px;font-size:14px;
+                            font-weight:500;margin-top:4px;">
+                    {action_text}
+                </div>""",
+            unsafe_allow_html=True,
+        )
+
+        # Risk tier legend
+        st.markdown("")
+        st.markdown("""
+**Risk tier guide**
+
 | Tier | Delinquency probability | Recommended action |
 |------|------------------------|--------------------|
-| 🟢 Low Risk | 0 – 30% | Safe to approve |
-| 🟡 Medium Risk | 31 – 50% | Approve with monitoring |
-| 🟠 High Risk | 51 – 70% | Additional review required |
-| 🔴 Critical | 71 – 100% | High default risk — escalate |
-                    """
-                )
+| 🟢 Low Risk     | 0 – 30%   | Safe to approve |
+| 🟡 Medium Risk  | 31 – 50%  | Approve with monitoring |
+| 🟠 High Risk    | 51 – 70%  | Additional review required |
+| 🔴 Critical     | 71 – 100% | High default risk — escalate |
+        """)
 
-            # Feature contribution breakdown (top drivers)
-            with st.expander("🔬 Top risk drivers (model coefficients)"):
-                coef = skl_model.coef_[0]
-                contributions = [(FEATURE_NAMES[i], float(coef[i]), float(X[0][i]))
-                                 for i in range(len(FEATURE_NAMES))]
-                active = [(n, c, v) for n, c, v in contributions if v != 0]
-                active.sort(key=lambda x: abs(x[1] * x[2]), reverse=True)
-
-                st.markdown("Features active for this applicant, sorted by influence:")
-                for name, coef_val, feat_val in active[:10]:
-                    direction = "↑ increases" if coef_val > 0 else "↓ decreases"
-                    sign = "🔴" if coef_val > 0 else "🟢"
-                    st.markdown(
-                        f"{sign} **{name}** — coef `{coef_val:+.4f}` · "
-                        f"value `{feat_val:.4f}` · {direction} delinquency risk"
-                    )
-
-        except Exception as e:
-            st.error(f"Prediction error: {e}")
-            st.info(
-                "This may be a model compatibility issue. "
-                "Ensure the .pkcls file is the logistic regression classifier "
-                "trained on the same 30-feature schema."
-            )
+    except Exception as e:
+        st.error(f"Prediction failed. Please check the input values and try again.\n\n`{e}`")
